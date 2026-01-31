@@ -78,8 +78,7 @@ class HTMWTrader:
                 rows = self.driver.find_elements(By.CSS_SELECTOR, "table#tOpenPositions_equities tbody.openpositions-data tr")
             except Exception as e:
                 if self.verbose: print(f"Open positions table not found: {e}")
-                return []
-
+            
             positions = []
             for row in rows:
                 cols = row.find_elements(By.TAG_NAME, "td")
@@ -92,11 +91,62 @@ class HTMWTrader:
                         "symbol": symbol,
                         "quantity": cols[3].text.strip(),
                         "price": cols[4].text.strip(),
-                        "market_value": cols[6].text.strip()
+                        "market_value": cols[6].text.strip(),
+                        "status": "Filled"
                     })
+                    
+            # Handle Pending Orders by merging them into positions
+            try:
+                pending = self.get_pending_orders()
+                for p in pending:
+                    # Avoid duplicates if HTMW somehow lists them in both (unlikely)
+                    if not any(pos['symbol'] == p['symbol'] and pos['status'] == 'Filled' for pos in positions):
+                        positions.append({
+                            "symbol": p["symbol"],
+                            "quantity": p["quantity"],
+                            "price": p["order_price"],
+                            "market_value": "PENDING",
+                            "status": f"Pending ({p['action']})"
+                        })
+            except Exception as pe:
+                if self.verbose: print(f"Error merging pending orders: {pe}")
+
             return positions
         except Exception as e:
             if self.verbose: print(f"Error during open positions scrape: {e}")
+            return []
+
+    def get_pending_orders(self):
+        try:
+            self.driver.get("https://app.howthemarketworks.com/trading/orderhistory?status=Open")
+            wait = WebDriverWait(self.driver, 10)
+            
+            rows = []
+            try:
+                # Target the order history table rows
+                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".large-9.columns table tbody tr")))
+                rows = self.driver.find_elements(By.CSS_SELECTOR, ".large-9.columns table tbody tr")
+            except Exception as e:
+                # If no pending orders, the table might have "No data" or just be empty
+                return []
+
+            pending = []
+            for row in rows:
+                cols = row.find_elements(By.TAG_NAME, "td")
+                # Mapping: 0=Date, 1=Action, 2=Symbol, 3=Qty, 4=Order Price, 8=Order#, 9=Status
+                if len(cols) >= 5:
+                    symbol = cols[2].text.strip()
+                    if symbol and symbol != "Symbol": # Avoid header if it exists
+                        pending.append({
+                            "symbol": symbol,
+                            "quantity": cols[3].text.strip(),
+                            "order_price": cols[4].text.strip(),
+                            "action": cols[1].text.strip(),
+                            "order_id": cols[8].text.strip() if len(cols) > 8 else "N/A"
+                        })
+            return pending
+        except Exception as e:
+            if self.verbose: print(f"Error during pending orders scrape: {e}")
             return []
 
     def trade(self, symbol, action, quantity, order_type="Market", limit_stop_price=0, order_term='Good for Day'):
@@ -424,8 +474,13 @@ def get_portfolio_summary():
 
 @mcp.tool()
 def get_open_positions():
-    """Get a list of all currently open stock positions."""
+    """Get a list of all currently open stock positions, including pending orders."""
     return get_trader().get_open_positions()
+
+@mcp.tool()
+def get_pending_orders():
+    """Get a list of all active orders that have not yet been filled."""
+    return get_trader().get_pending_orders()
 
 @mcp.tool()
 def trade_stock(symbol: str, action: str, quantity: int, order_type: str = "Market", limit_stop_price: float = 0, order_term: str = 'Good for Day'):

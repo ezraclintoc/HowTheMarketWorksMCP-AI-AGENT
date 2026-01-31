@@ -20,7 +20,7 @@ load_dotenv()
 # Configuration
 DEFAULT_MODEL = "gpt-oss:20b"
 MCP_SERVER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp_scrape.py")
-VENV_PYTHON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv/bin/python")
+VENV_PYTHON = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv/bin/python")
 
 # Global state for flags
 config = {
