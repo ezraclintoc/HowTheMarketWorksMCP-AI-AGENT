@@ -1,0 +1,9 @@
+services:
+  htmw-mcp:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - HTMW_USERNAME=${HTMW_USERNAME}
+      - HTMW_PASSWORD=${HTMW_PASSWORD}
+    restart: unless-stopped
