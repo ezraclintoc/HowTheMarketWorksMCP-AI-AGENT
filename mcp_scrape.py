@@ -8,18 +8,26 @@ import time
 from dotenv import load_dotenv
 import os
 import json
+import pickle
+import logging
 from fastmcp import FastMCP
 
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("HTMWScraper")
+
 class HTMWTrader:
-    def __init__(self, username, password, headless=True, verbose=False):
+    def __init__(self, username, password, headless=True, verbose=False, cookie_path="htmw_cookies.pkl"):
         self.username = username
         self.password = password
         self.headless = headless
         self.verbose = verbose
-        self.driver = self._setup_driver()
-        self.login()
+        self.cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), cookie_path)
+        self.driver = None
+        self.ensure_driver()
 
     def _setup_driver(self):
+        if self.verbose: logger.info("Setting up new Chrome driver...")
         options = webdriver.ChromeOptions()
         if self.headless:
             options.add_argument("--headless")
@@ -30,9 +38,59 @@ class HTMWTrader:
         driver = webdriver.Chrome(service=service, options=options)
         return driver
 
+    def ensure_driver(self):
+        """Checks if driver is alive, restarts if needed."""
+        try:
+            if self.driver:
+                # Try a lightweight check
+                self.driver.current_url
+                return True
+        except Exception:
+            if self.verbose: logger.warning("Driver is dead or not initialized. Reconnecting...")
+            try: self.driver.quit()
+            except: pass
+            
+        self.driver = self._setup_driver()
+        self.login()
+        return True
+
+    def save_cookies(self):
+        try:
+            with open(self.cookie_path, 'wb') as f:
+                pickle.dump(self.driver.get_cookies(), f)
+            if self.verbose: logger.info("Cookies saved successfully.")
+        except Exception as e:
+            if self.verbose: logger.error(f"Failed to save cookies: {e}")
+
+    def load_cookies(self):
+        if not os.path.exists(self.cookie_path):
+            return False
+        try:
+            with open(self.cookie_path, 'rb') as f:
+                cookies = pickle.load(f)
+                for cookie in cookies:
+                    self.driver.add_cookie(cookie)
+            if self.verbose: logger.info("Cookies loaded successfully.")
+            return True
+        except Exception as e:
+            if self.verbose: logger.error(f"Failed to load cookies: {e}")
+            return False
+
     def login(self):
         try:
             self.driver.get("https://app.howthemarketworks.com/login")
+            
+            # Try loading cookies first
+            if self.load_cookies():
+                self.driver.refresh()
+                try:
+                    # Check if we are actually logged in by looking for a logged-in element (e.g., .summary)
+                    WebDriverWait(self.driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".summary")))
+                    if self.verbose: logger.info("Logged in via cookies.")
+                    return
+                except:
+                    if self.verbose: logger.info("Cookies expired or invalid. Proceeding with full login.")
+            
             wait = WebDriverWait(self.driver, 15)
             wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".login-register-form")))
 
@@ -40,10 +98,10 @@ class HTMWTrader:
             try:
                 cookie_btn = self.driver.find_element(By.ID, "cookie-banner-btn")
                 cookie_btn.click()
-                if self.verbose: print("Closed cookie banner.")
+                if self.verbose: logger.info("Closed cookie banner.")
                 time.sleep(1)
             except:
-                if self.verbose: print("No cookie banner found or could not close.")
+                pass
 
             # Find and fill username
             user_field = self.driver.find_element(By.ID, "UserName")
@@ -59,14 +117,18 @@ class HTMWTrader:
             login_btn = self.driver.find_element(By.XPATH, "//input[@value='Login']")
             login_btn.click()
             
-            if self.verbose: print("Login credentials submitted.")
+            if self.verbose: logger.info("Login credentials submitted.")
             wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".summary"))) # Wait for login to process
             
+            # Save cookies after successful login
+            self.save_cookies()
+            
         except Exception as e:
-            if self.verbose: print(f"Error during login: {e}")
+            if self.verbose: logger.error(f"Error during login: {e}")
             raise e
 
     def get_open_positions(self):
+        self.ensure_driver()
         try:
             self.driver.get("https://app.howthemarketworks.com/accounting/openpositions")
             wait = WebDriverWait(self.driver, 10)
@@ -117,6 +179,7 @@ class HTMWTrader:
             return []
 
     def get_pending_orders(self):
+        self.ensure_driver()
         try:
             self.driver.get("https://app.howthemarketworks.com/trading/orderhistory?status=Open")
             wait = WebDriverWait(self.driver, 10)
@@ -150,7 +213,8 @@ class HTMWTrader:
             return []
 
     def trade(self, symbol, action, quantity, order_type="Market", limit_stop_price=0, order_term='Good for Day'):
-        if self.verbose: print(f"Trading {action} {quantity} shares of {symbol} at {order_type}...")
+        self.ensure_driver()
+        if self.verbose: logger.info(f"Trading {action} {quantity} shares of {symbol} at {order_type}...")
         try:
             self.driver.get("https://app.howthemarketworks.com/trading/equities")
             wait = WebDriverWait(self.driver, 10)
@@ -203,6 +267,7 @@ class HTMWTrader:
             return f"Error during trading: {e}"
 
     def get_ticker_details(self, symbol):
+        self.ensure_driver()
         try:
             url = f"https://app.howthemarketworks.com/quotes/quotes?type=detailedquotetabchartnews&symbol={symbol}"
             self.driver.get(url)
@@ -233,6 +298,7 @@ class HTMWTrader:
             return {"error": str(e)}
 
     def get_ticker_news(self, symbol, quantity=5):
+        self.ensure_driver()
         try:
             url = f"https://app.howthemarketworks.com/quotes/quotes?type=fullnewssummary&symbol={symbol}"
             self.driver.get(url)
@@ -255,6 +321,7 @@ class HTMWTrader:
             return []
 
     def get_article_by_storyid(self, symbol: str, storyid: str):
+        self.ensure_driver()
         try:
             url = f"https://app.howthemarketworks.com/quotes/quotes?type=fullnewssummary&symbol={symbol}"
             self.driver.get(url)
@@ -294,9 +361,10 @@ class HTMWTrader:
                 pass
             return article_link
         except Exception as e:
-            return Nonez
+            return None
 
     def get_portfolio_summary(self):
+        self.ensure_driver()
         try:
             self.driver.get("https://app.howthemarketworks.com/accounting/dashboard")
             wait = WebDriverWait(self.driver, 10)
@@ -330,6 +398,7 @@ class HTMWTrader:
             return {"error": str(e)}
 
     def get_market_movers(self):
+        self.ensure_driver()
         movers = {}
         try:
             url = "https://app.howthemarketworks.com/quotes/quotes?type=marketmovers"
@@ -359,6 +428,7 @@ class HTMWTrader:
             return {}
 
     def get_analyst_ratings(self, symbol):
+        self.ensure_driver()
         try:
             url = f"https://app.howthemarketworks.com/quotes/quotes?type=analyst&symbol={symbol}"
             self.driver.get(url)
@@ -417,6 +487,7 @@ class HTMWTrader:
             return {"error": str(e)}
 
     def get_price_history(self, symbol):
+        self.ensure_driver()
         try:
             url = f"https://app.howthemarketworks.com/quotes/quotes?type=pricehistorydownload1&symbol={symbol}"
             self.driver.get(url)

@@ -1,0 +1,10 @@
+selenium
+webdriver-manager
+python-dotenv
+ollama
+openai
+anyio
+fastmcp
+argparse
+rich
+questionary

@@ -36,3 +36,7 @@ venv/
 .vscode/
 .idea/
 .DS_Store
+
+AGENTS.md
+trading_journal.json
+watchlist.json
