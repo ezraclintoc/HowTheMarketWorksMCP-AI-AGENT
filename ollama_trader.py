@@ -649,45 +649,64 @@ async def phase_intelligence(session, ollama_tools):
         res = await session.call_tool("get_market_movers", {})
         text = "".join([c.text for c in res.content if hasattr(c, 'text')])
         snapshot["movers"] = extract_json(text) or {}
-        log(f"[+] Tool Result: {list(snapshot['movers'].keys())}", level="verbose2")
     except Exception as e:
         log(f"Movers fetch failed: {e}", level="error")
+        
+    # Log a better summary of movers
+    movers_summary = []
+    for cat, syms in snapshot["movers"].items():
+        if isinstance(syms, list) and syms:
+            sample = f" [{', '.join(syms[:3])}...]" if len(syms) > 3 else f" {syms}"
+            movers_summary.append(f"{cat}{sample}({len(syms)})")
     
+    log(f"[+] Movers Found: {', '.join(movers_summary) if movers_summary else 'None'}", level="verbose2")
+    
+    p_syms = [pos.get("symbol", "").split('\n')[0].strip().upper() for pos in snapshot["positions"]]
     log(f"  Portfolio: {snapshot['portfolio']}", level="verbose1")
-    log(f"  Positions: {len(snapshot['positions'])} held", level="verbose1")
-    log(f"  Movers categories: {list(snapshot['movers'].keys())}", level="verbose1")
+    log(f"  Positions: {len(snapshot['positions'])} held{(' (' + ', '.join(p_syms) + ')') if p_syms else ''}", level="verbose1")
+    log(f"  Movers: {len(snapshot['movers'])} categories found", level="verbose1")
     
     return snapshot
 
 def extract_candidate_symbols(snapshot, watchlist):
-    """Extract candidate symbols from market data (code, not LLM)."""
-    candidates = set()
+    """Extract candidate symbols using a round-robin approach for category diversity."""
+    import itertools
+    candidates_set = set()
     
-    # From market movers
-    for category, symbols in snapshot.get("movers", {}).items():
-        if isinstance(symbols, list):
-            for sym in symbols[:5]:  # Top 5 from each category
-                sym = str(sym).strip().upper()
-                if sym and 1 <= len(sym) <= 5 and sym.isalpha():
-                    candidates.add(sym)
+    # 1. Prepare lists for round-robin
+    category_lists = []
     
+    # From market movers categories
+    for cat, syms in snapshot.get("movers", {}).items():
+        if isinstance(syms, list) and syms:
+            category_lists.append([str(s).strip().upper() for s in syms])
+            
     # From watchlist
-    for sym in watchlist:
-        sym = str(sym).strip().upper()
-        if sym and 1 <= len(sym) <= 5:
-            candidates.add(sym)
-    
+    if watchlist:
+        category_lists.append([str(s).strip().upper() for s in watchlist])
+        
     # From current positions (to check on holdings)
-    for pos in snapshot.get("positions", []):
-        sym = pos.get("symbol", "").split('\n')[0].strip().upper()
-        if sym and 1 <= len(sym) <= 5:
-            candidates.add(sym)
+    pos_syms = [pos.get("symbol", "").split('\n')[0].strip().upper() for pos in snapshot.get("positions", [])]
+    if pos_syms:
+        category_lists.append(pos_syms)
+
+    # 2. Blacklist of labels and common false positives
+    blacklist = {
+        "HTMW", "AI", "USD", "ETF", "BUY", "SELL", "HOLD", "NEWS", "SMA", "RSI", "ATH", "IPO", "SEC", "CEO", "CFO", "EPS", "GDP",
+        "TFSA", "RRSP", "RESP", "FHSA", "LIRA", "RRIF", "RDSP", "TAX", "FUND", "ACCOUNT", "PORTFOLIO", "TOTAL", "CASH", "VALUE",
+        "SYMBOL", "PRICE", "CHANGE", "CHG", "VOL", "VOLUME", "MKT", "CAP", "OPEN", "HIGH", "LOW", "DATE", "NEWS", "CHAT", "TFS"
+    }
+
+    # 3. Round-robin selection
+    candidates = []
+    for sym_tuple in itertools.zip_longest(*category_lists):
+        for sym in sym_tuple:
+            if sym and sym not in candidates_set and sym not in blacklist:
+                if 1 <= len(sym) <= 5 and re.match(r'^[A-Z.\-]+$', sym):
+                    candidates_set.add(sym)
+                    candidates.append(sym)
     
-    # Filter common false positives
-    blacklist = {"HTMW", "AI", "USD", "ETF", "BUY", "SELL", "HOLD", "NEWS", "SMA", "RSI", "ATH", "IPO", "SEC", "CEO", "CFO", "EPS", "GDP"}
-    candidates = [s for s in candidates if s not in blacklist]
-    
-    return candidates[:6]  # Limit to 6 candidates
+    return candidates
 
 
 async def _analyze_single_symbol(session, ollama_tools, symbol, schema_hint):
@@ -725,7 +744,7 @@ async def phase_analysis(session, ollama_tools, candidates):
         log("  No candidates to analyze.", level="info")
         return []
     
-    symbols_to_analyze = candidates[:3]
+    symbols_to_analyze = candidates[:]
     log(f"  Analyzing {len(symbols_to_analyze)} symbol(s) concurrently: {', '.join(symbols_to_analyze)}", level="info")
     
     schema_hint = '{"symbol":"...","direction":"bullish|bearish|neutral","conviction":1-10,"technical_summary":"...","catalysts":[...],"risk_factors":[...],"analyst_consensus":"..."}'

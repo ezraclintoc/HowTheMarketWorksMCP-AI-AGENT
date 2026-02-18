@@ -398,33 +398,49 @@ class HTMWTrader:
             return {"error": str(e)}
 
     def get_market_movers(self):
+        """Fetches market movers using a robust JS-based approach to ensure all tables are loaded and parsed correctly."""
         self.ensure_driver()
-        movers = {}
         try:
             url = "https://app.howthemarketworks.com/quotes/quotes?type=marketmovers"
             self.driver.get(url)
-            wait = WebDriverWait(self.driver, 10)
-            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".qmod-marketmovers-table-title")))
-
-            panels = self.driver.find_elements(By.CSS_SELECTOR, ".qmod-panel")
-            for panel in panels:
-                try:
-                    title_el = panel.find_element(By.CSS_SELECTOR, ".qmod-marketmovers-table-title")
-                    title = title_el.text.strip()
-                    symbols = []
-                    rows = panel.find_elements(By.CSS_SELECTOR, "table.qmod-marketmovers-table tbody tr")
-                    for row in rows:
-                        try:
-                            sym_el = row.find_element(By.CSS_SELECTOR, "td.qmod-col-symbol")
-                            symbols.append(sym_el.text.strip())
-                        except:
-                            continue
-                    if title and symbols:
-                        movers[title] = symbols
-                except:
-                    continue
-            return movers
+            wait = WebDriverWait(self.driver, 15)
+            # Wait for at least one symbol cell to be populated with text
+            wait.until(lambda d: d.find_elements(By.CSS_SELECTOR, "td.qmod-col-symbol") and any(el.text.strip() for el in d.find_elements(By.CSS_SELECTOR, "td.qmod-col-symbol")))
+            
+            # Use JS to extract all mover categories and their symbols efficiently
+            movers = self.driver.execute_script("""
+                let movers = {};
+                let panels = document.querySelectorAll(".qmod-panel");
+                panels.forEach(panel => {
+                    let titleEl = panel.querySelector(".qmod-marketmovers-table-title");
+                    if (!titleEl) return;
+                    let title = titleEl.innerText.trim();
+                    if (!title) return;
+                    
+                    let symbols = [];
+                    // Find all symbol cells in this panel
+                    let symEls = panel.querySelectorAll("td.qmod-col-symbol");
+                    symEls.forEach(el => {
+                        let sym = el.innerText.trim().split('\\n')[0];
+                        // Ticker validation: 1-5 chars, uppercase letters, dots, or hyphens
+                        if (sym && sym.length >= 1 && sym.length <= 6 && /^[A-Z.\\-]+$/.test(sym)) {
+                            // Exclude common garbage words that might look like tickers
+                            const blacklist = ["SYMBOL", "PRICE", "CHANGE", "CHG", "VOL", "VOLUME", "MKT", "CAP", "OPEN", "HIGH", "LOW"];
+                            if (!blacklist.includes(sym)) {
+                                symbols.push(sym);
+                            }
+                        }
+                    });
+                    
+                    if (symbols.length > 0) {
+                        movers[title] = symbols;
+                    }
+                });
+                return movers;
+            """)
+            return movers or {}
         except Exception as e:
+            if self.verbose: print(f"Error in get_market_movers: {e}")
             return {}
 
     def get_analyst_ratings(self, symbol):
