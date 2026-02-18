@@ -148,20 +148,20 @@ def log(msg, level="info"):
         return
     
     if level == "info":
-        print(msg)
+        print(msg, flush=True)
     elif level == "verbose1" and (config["verbose_level"] >= 1 or config["debug"]):
         if msg.startswith("[*]"):
             msg = Color.paint("[*]", Color.BLUE) + msg[3:]
-        print(msg)
+        print(msg, flush=True)
     elif level == "verbose2" and (config["verbose_level"] >= 2 or config["debug"]):
         if msg.startswith("[+]"):
             msg = Color.paint("[+]", Color.GREEN) + msg[3:]
-        print(msg)
+        print(msg, flush=True)
     elif level == "error":
-        print(f"{Color.paint('ERROR:', Color.RED)} {msg}", file=sys.stderr)
+        print(f"{Color.paint('ERROR:', Color.RED)} {msg}", file=sys.stderr, flush=True)
     elif level == "phase":
         # Special formatting for phase headers
-        print(f"\n{Color.paint('───', Color.DIM)} {Color.paint(msg, Color.BOLD + Color.PURPLE)} {Color.paint('───', Color.DIM)}")
+        print(f"\n{Color.paint('───', Color.DIM)} {Color.paint(msg, Color.BOLD + Color.PURPLE)} {Color.paint('───', Color.DIM)}", flush=True)
 
 # ─────────────────────────────────────────────────────────────────────
 # JSON Parsing Helpers
@@ -282,8 +282,8 @@ async def llm_chat(messages, tools=None, model=None):
     model = model or config["model"]
     
     if config["provider"] == "ollama" and "localhost" in config["base_url"] and config["base_url"].endswith("11434/v1"):
-        response = await asyncio.to_thread(
-            ollama.chat,
+        async_client = ollama.AsyncClient()
+        response = await async_client.chat(
             model=model,
             messages=messages,
             tools=tools,
@@ -335,14 +335,35 @@ async def process_ai_response(session, messages, ollama_tools, role_name="AI", m
 
         response = await llm_chat(messages, tools=ollama_tools, model=current_model)
 
-        while response.get('message', {}).get('tool_calls'):
-            if response['message'].get('content'):
+        while response.get('message', {}).get('tool_calls') or (response['message'].get('content') and '{"name":' in response['message'].get('content')):
+            # FALLBACK: Detect tool calls output as text by the model
+            raw_tool_calls = response['message'].get('tool_calls') or []
+            content_text = response['message'].get('content', "")
+            
+            # If no native tool calls but content contains what looks like a JSON tool call
+            if not raw_tool_calls and '{"name":' in content_text:
+                log(f"[*] Fallback: Detecting tool calls in text content...", level="debug")
+                # Look for {"name": "...", "arguments": {...}}
+                matches = re.findall(r'(\{\s*"name":\s*".*?"\s*,\s*"arguments":\s*\{.*?\}\s*\})', content_text, re.DOTALL)
+                for m in matches:
+                    try:
+                        parsed = json.loads(m)
+                        if "name" in parsed and "arguments" in parsed:
+                            raw_tool_calls.append({"function": parsed})
+                            log(f"[*] Fallback: Parsed tool call '{parsed['name']}' from text.", level="verbose1")
+                    except:
+                        pass
+
+            if not raw_tool_calls:
+                break
+
+            if response['message'].get('content') and not raw_tool_calls:
                 log(f"\n{Color.paint(role_name, Color.BOLD + Color.CYAN)}: {response['message']['content']}\n", level="verbose2")
                 response['message']['content'] = ""
 
             messages.append(response['message'])
             
-            for tool_call in response['message']['tool_calls']:
+            for tool_call in raw_tool_calls:
                 tool_name = tool_call['function']['name']
                 arguments = tool_call['function']['arguments']
                 
@@ -597,38 +618,40 @@ def risk_gate(proposals, portfolio, positions, risk_config):
 # ─────────────────────────────────────────────────────────────────────
 
 async def phase_intelligence(session, ollama_tools):
-    """Phase 1: Gather market data using tools."""
+    """Phase 1: Gather market data using tools (Deterministic)."""
     log("Phase 1: Intelligence Gathering", level="phase")
     
-    messages = [
-        {"role": "system", "content": PHASE_PROMPTS["intelligence"]},
-        {"role": "user", "content": "Collect the current market data now. Call all three tools."}
-    ]
+    snapshot = {"portfolio": {}, "positions": [], "movers": {}, "raw_summary": "Data gathered deterministically."}
     
-    messages = await process_ai_response(session, messages, ollama_tools, role_name="Intel", model=config["model"])
-    
-    # Extract structured data from tool results in the message history
-    snapshot = {"portfolio": {}, "positions": [], "movers": {}, "raw_summary": ""}
-    
-    for msg in messages:
-        if msg.get("role") == "tool":
-            content = msg.get("content", "")
-            parsed = extract_json(content)
-            if parsed:
-                if isinstance(parsed, dict):
-                    if "net_worth" in parsed or "cash" in parsed or "buying_power" in parsed:
-                        snapshot["portfolio"] = parsed
-                    elif any(k in parsed for k in ["Gainers", "Losers", "Most Active", "Top Gainers", "Top Volume"]):
-                        snapshot["movers"] = parsed
-                elif isinstance(parsed, list) and len(parsed) > 0:
-                    if isinstance(parsed[0], dict) and "symbol" in parsed[0]:
-                        snapshot["positions"] = parsed
-    
-    # Get the final summary from the AI
-    for msg in reversed(messages):
-        if msg.get("role") == "assistant" and msg.get("content"):
-            snapshot["raw_summary"] = msg["content"]
-            break
+    # 1. Get Portfolio
+    log("[*] Calling tool: get_portfolio_summary()", level="verbose1")
+    try:
+        res = await session.call_tool("get_portfolio_summary", {})
+        text = "".join([c.text for c in res.content if hasattr(c, 'text')])
+        snapshot["portfolio"] = extract_json(text) or {}
+        log(f"[+] Tool Result: {text[:100]}...", level="verbose2")
+    except Exception as e:
+        log(f"Portfolio fetch failed: {e}", level="error")
+
+    # 2. Get Positions
+    log("[*] Calling tool: get_open_positions()", level="verbose1")
+    try:
+        res = await session.call_tool("get_open_positions", {})
+        text = "".join([c.text for c in res.content if hasattr(c, 'text')])
+        snapshot["positions"] = extract_json(text) or []
+        log(f"[+] Tool Result: Found {len(snapshot['positions'])} positions", level="verbose2")
+    except Exception as e:
+        log(f"Positions fetch failed: {e}", level="error")
+
+    # 3. Get Movers
+    log("[*] Calling tool: get_market_movers()", level="verbose1")
+    try:
+        res = await session.call_tool("get_market_movers", {})
+        text = "".join([c.text for c in res.content if hasattr(c, 'text')])
+        snapshot["movers"] = extract_json(text) or {}
+        log(f"[+] Tool Result: {list(snapshot['movers'].keys())}", level="verbose2")
+    except Exception as e:
+        log(f"Movers fetch failed: {e}", level="error")
     
     log(f"  Portfolio: {snapshot['portfolio']}", level="verbose1")
     log(f"  Positions: {len(snapshot['positions'])} held", level="verbose1")
@@ -667,43 +690,52 @@ def extract_candidate_symbols(snapshot, watchlist):
     return candidates[:6]  # Limit to 6 candidates
 
 
+async def _analyze_single_symbol(session, ollama_tools, symbol, schema_hint):
+    """Analyze a single symbol. Used as a concurrent task in phase_analysis."""
+    log(f"  ┌─ Analyzing {Color.paint(symbol, Color.BOLD + Color.YELLOW)}", level="info")
+    
+    system_prompt = PHASE_PROMPTS["analyst"].format(symbol=symbol)
+    user_prompt = f"Analyze {symbol} now. Call all four tools, then provide your JSON analysis."
+    
+    result = await llm_json_call(
+        session, system_prompt, user_prompt,
+        tools=ollama_tools,
+        schema_hint=schema_hint,
+        model=config["agent_model"],
+        role_name=f"Analyst({symbol})"
+    )
+    
+    if result and isinstance(result, dict):
+        result.setdefault("symbol", symbol)
+        direction = result.get("direction", "?")
+        conviction = result.get("conviction", "?")
+        dir_color = Color.GREEN if direction == "bullish" else (Color.RED if direction == "bearish" else Color.YELLOW)
+        log(f"  └─ {symbol}: {Color.paint(direction, dir_color)} (conviction: {conviction}/10)", level="info")
+        return result
+    else:
+        log(f"  └─ {symbol}: Analysis failed (could not parse JSON)", level="info")
+        return {"symbol": symbol, "direction": "neutral", "conviction": 3, "technical_summary": "Analysis unavailable", "catalysts": [], "risk_factors": ["Analysis failed"], "analyst_consensus": "N/A"}
+
+
 async def phase_analysis(session, ollama_tools, candidates):
-    """Phase 2: Deep-dive analysis on candidate symbols."""
+    """Phase 2: Deep-dive analysis on candidate symbols (runs concurrently)."""
     log("Phase 2: Symbol Analysis", level="phase")
     
     if not candidates:
         log("  No candidates to analyze.", level="info")
         return []
     
-    log(f"  Analyzing: {', '.join(candidates)}", level="info")
+    symbols_to_analyze = candidates[:3]
+    log(f"  Analyzing {len(symbols_to_analyze)} symbol(s) concurrently: {', '.join(symbols_to_analyze)}", level="info")
     
-    reports = []
     schema_hint = '{"symbol":"...","direction":"bullish|bearish|neutral","conviction":1-10,"technical_summary":"...","catalysts":[...],"risk_factors":[...],"analyst_consensus":"..."}'
     
-    for symbol in candidates[:3]:  # Analyze top 3
-        log(f"  ┌─ Analyzing {Color.paint(symbol, Color.BOLD + Color.YELLOW)}", level="info")
-        
-        system_prompt = PHASE_PROMPTS["analyst"].format(symbol=symbol)
-        user_prompt = f"Analyze {symbol} now. Call all four tools, then provide your JSON analysis."
-        
-        result = await llm_json_call(
-            session, system_prompt, user_prompt,
-            tools=ollama_tools,
-            schema_hint=schema_hint,
-            model=config["agent_model"],
-            role_name=f"Analyst({symbol})"
-        )
-        
-        if result and isinstance(result, dict):
-            result.setdefault("symbol", symbol)
-            reports.append(result)
-            direction = result.get("direction", "?")
-            conviction = result.get("conviction", "?")
-            dir_color = Color.GREEN if direction == "bullish" else (Color.RED if direction == "bearish" else Color.YELLOW)
-            log(f"  └─ {symbol}: {Color.paint(direction, dir_color)} (conviction: {conviction}/10)", level="info")
-        else:
-            log(f"  └─ {symbol}: Analysis failed (could not parse JSON)", level="info")
-            reports.append({"symbol": symbol, "direction": "neutral", "conviction": 3, "technical_summary": "Analysis unavailable", "catalysts": [], "risk_factors": ["Analysis failed"], "analyst_consensus": "N/A"})
+    # Launch all analysts concurrently
+    tasks = [
+        _analyze_single_symbol(session, ollama_tools, symbol, schema_hint)
+        for symbol in symbols_to_analyze
+    ]
+    reports = list(await asyncio.gather(*tasks))
     
     return reports
 
