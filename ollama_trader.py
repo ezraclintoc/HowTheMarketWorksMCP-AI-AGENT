@@ -5,6 +5,7 @@ import sys
 import threading
 import ollama
 from openai import AsyncOpenAI
+import signal
 import trading_engine
 from trading_engine import run_trader, config, log, Color
 
@@ -76,7 +77,9 @@ def main():
         # Note: GUI runs the trader in its own thread internally
         import trader_gui
         from PySide6.QtWidgets import QApplication
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
         app = QApplication(sys.argv)
+        app.setStyle("Fusion")
         provider = get_provider()
         window = trader_gui.TradingGUI(provider=provider)
         window.show()

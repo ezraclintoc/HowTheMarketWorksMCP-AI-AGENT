@@ -16,26 +16,28 @@ from typing import Optional, List, Dict, Any
 # from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
+import queue
+
 # Interface Integration
 class EventRegistry:
     def __init__(self):
-        self.queues = []
+        self.subscribers = []
 
     def subscribe(self):
-        q = asyncio.Queue()
-        self.queues.append(q)
+        q = queue.Queue()
+        self.subscribers.append(q)
         return q
 
     def unsubscribe(self, q):
-        if q in self.queues:
-            self.queues.remove(q)
+        if q in self.subscribers:
+            self.subscribers.remove(q)
 
     def post_event(self, event_type: str, data: Any):
         event = {"type": event_type, "data": data}
-        for q in self.queues:
+        for q in self.subscribers:
             try:
                 q.put_nowait(event)
-            except asyncio.QueueFull:
+            except:
                 pass
 
 events = EventRegistry()
@@ -49,30 +51,38 @@ class TradeEventHandler:
     @staticmethod
     def ai_log(text):
         events.post_event("ai_log", text)
-        
+
     @staticmethod
     def system_log(text):
         events.post_event("system_log", text)
-        
-    @staticmethod
-    def positions(data):
-        events.post_event("positions", data)
-        
-    @staticmethod
-    def watchlist(data):
-        events.post_event("watchlist", data)
-        
-    @staticmethod
-    def portfolio_value(data):
-        events.post_event("portfolio_value", data)
 
     @staticmethod
     def portfolio_snapshot(data):
         events.post_event("portfolio_snapshot", data)
 
     @staticmethod
+    def positions(data):
+        events.post_event("positions", data)
+
+    @staticmethod
+    def watchlist(data):
+        events.post_event("watchlist", data)
+
+    @staticmethod
+    def portfolio_value(data):
+        events.post_event("portfolio_value", data)
+
+    @staticmethod
     def performance(data):
         events.post_event("performance", data)
+
+    @staticmethod
+    def cycle_timer(seconds):
+        events.post_event("cycle_timer", seconds)
+
+    @staticmethod
+    def heartbeat():
+        events.post_event("heartbeat", True)
 
 load_dotenv()
 
@@ -166,7 +176,7 @@ class AISpinner:
         self.task = None
 
     async def spin(self):
-        if events.queues: return # No spinner if an interface is attached
+        if events.subscribers: return # No spinner if an interface is attached
         
         start_time = time.time()
         tagline = random.choice(TAGLINES)
@@ -184,7 +194,7 @@ class AISpinner:
         sys.stdout.flush()
 
     async def __aenter__(self):
-        if events.queues: return self
+        if events.subscribers: return self
         if config["verbose_level"] == 0 and not config["silent"] and not config["debug"]:
             self.task = asyncio.create_task(self.spin())
         return self
@@ -196,7 +206,7 @@ class AISpinner:
 
 def log(msg, level="info"):
     # ALWAYS route to events if subscribers exist
-    if events.queues:
+    if events.subscribers:
         if level == "error":
             TradeEventHandler.system_log(f"[red]ERROR:[/red] {msg}")
         elif level == "phase":
@@ -354,7 +364,11 @@ async def process_ai_response(session, messages, ollama_tools, role_name="AI", m
     log(f"[{role_name}] Calling {config['provider']} with model {current_model}...", level="debug")
     async with AISpinner():
         response = await llm_chat(messages, tools=ollama_tools, model=current_model)
-        while response.get('message', {}).get('tool_calls') or (response['message'].get('content') and '{"name":' in response['message'].get('content')):
+        tool_call_count = 0
+        MAX_TOOL_CALLS = 10
+        
+        while tool_call_count < MAX_TOOL_CALLS and (response.get('message', {}).get('tool_calls') or (response['message'].get('content') and '{"name":' in response['message'].get('content'))):
+            tool_call_count += 1
             raw_tool_calls = response['message'].get('tool_calls') or []
             content_text = response['message'].get('content', "")
             if not raw_tool_calls and '{"name":' in content_text:
@@ -542,10 +556,18 @@ async def _analyze_single_symbol(session, ollama_tools, symbol, schema_hint):
 async def phase_analysis(session, ollama_tools, candidates):
     log("Phase 2: Alpha Analysis", level="phase")
     if not candidates: return []
-    symbols = candidates[:10]
+    symbols = candidates[:6] # Reduced limit for faster cycles
     schema_hint = '{"symbol":"...","direction":"bullish|bearish|neutral","conviction":1-10,"technical_summary":"..."}'
-    tasks = [_analyze_single_symbol(session, ollama_tools, s, schema_hint) for s in symbols]
-    return list(await asyncio.gather(*tasks))
+    
+    reports = []
+    total = len(symbols)
+    for i, sym in enumerate(symbols):
+        TradeEventHandler.status(f"Analyzing {i+1}/{total}: {sym}")
+        report = await _analyze_single_symbol(session, ollama_tools, sym, schema_hint)
+        reports.append(report)
+        
+    TradeEventHandler.status("Analysis Complete")
+    return reports
 
 async def phase_strategy(session, snapshot, reports, journal, memory):
     log("Phase 3: Tactical Strategy", level="phase")
@@ -575,6 +597,11 @@ async def phase_post_cycle(session, snapshot, approved, memory):
     memory["last_cycle_summary"] = summary
     save_memory(memory)
     log(f"Memory Updated: {summary[:100]}...", level="verbose2")
+
+_force_cycle_event = asyncio.Event()
+
+def force_cycle():
+    _force_cycle_event.set()
 
 async def run_trader(auto_mode=False, provider=None):
     if provider: set_llm_provider(provider)
@@ -638,4 +665,13 @@ async def run_trader(auto_mode=False, provider=None):
                 except Exception as e: log(f"Cycle error: {e}", level="error")
                 log("Cycle complete. Waiting...", level="info")
                 cycle += 1
-                await asyncio.sleep(900)
+                
+                # Wait for next cycle or force trigger
+                _force_cycle_event.clear()
+                for i in range(900, 0, -1):
+                    if _force_cycle_event.is_set():
+                        log("Manual refresh triggered.", level="info")
+                        break
+                    TradeEventHandler.cycle_timer(i)
+                    if i % 10 == 0: TradeEventHandler.heartbeat()
+                    await asyncio.sleep(1)

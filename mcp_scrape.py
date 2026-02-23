@@ -30,8 +30,15 @@ except ImportError:
 os.environ["FASTMCP_BANNER"] = "0"
 
 # Setup logging to stderr strictly
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', stream=sys.stderr)
+logging.basicConfig(level=logging.ERROR, stream=sys.stderr)
 logger = logging.getLogger("HTMWScraper")
+logger.setLevel(logging.ERROR)
+
+# Force silence for ALL related loggers
+for log_name in ["mcp", "fastmcp", "selenium", "urllib3", "webdriver_manager", "docket"]:
+    l = logging.getLogger(log_name)
+    l.setLevel(logging.ERROR)
+    l.propagate = False
 
 class HTMWTrader:
     def __init__(self, username, password, headless=True, verbose=False, cookie_path="config/htmw_cookies.pkl"):
@@ -674,5 +681,10 @@ def scrape_url(url: str):
 
 
 if __name__ == "__main__":
+    # Aggressively silence FastMCP internal logs
+    import logging
+    logging.getLogger("mcp").setLevel(logging.ERROR)
+    logging.getLogger("fastmcp").setLevel(logging.ERROR)
+    
     # Ensure no stdout pollution from fastmcp banner/logs
     mcp.run(log_level="ERROR")
