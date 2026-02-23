@@ -37,7 +37,7 @@ venv/
 .idea/
 .DS_Store
 
+# Project specific files
 AGENTS.md
-trading_journal.json
-watchlist.json
-htmw_cookies.pkl
+config/*.json
+*.pkl

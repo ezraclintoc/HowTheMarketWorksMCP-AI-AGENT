@@ -10,14 +10,31 @@ import os
 import json
 import pickle
 import logging
+import sys
 from fastmcp import FastMCP
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# Optional research tools
+try:
+    from duckduckgo_search import DDGS
+    HAS_DDG = True
+except ImportError:
+    HAS_DDG = False
+
+try:
+    import trafilatura
+    HAS_TRAFILATURA = True
+except ImportError:
+    HAS_TRAFILATURA = False
+
+# Force block banner before it can print
+os.environ["FASTMCP_BANNER"] = "0"
+
+# Setup logging to stderr strictly
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', stream=sys.stderr)
 logger = logging.getLogger("HTMWScraper")
 
 class HTMWTrader:
-    def __init__(self, username, password, headless=True, verbose=False, cookie_path="htmw_cookies.pkl"):
+    def __init__(self, username, password, headless=True, verbose=False, cookie_path="config/htmw_cookies.pkl"):
         self.username = username
         self.password = password
         self.headless = headless
@@ -139,7 +156,7 @@ class HTMWTrader:
                 wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table#tOpenPositions_equities tbody.openpositions-data tr")))
                 rows = self.driver.find_elements(By.CSS_SELECTOR, "table#tOpenPositions_equities tbody.openpositions-data tr")
             except Exception as e:
-                if self.verbose: print(f"Open positions table not found: {e}")
+                if self.verbose: print(f"Open positions table not found: {e}", file=sys.stderr)
             
             positions = []
             for row in rows:
@@ -171,11 +188,11 @@ class HTMWTrader:
                             "status": f"Pending ({p['action']})"
                         })
             except Exception as pe:
-                if self.verbose: print(f"Error merging pending orders: {pe}")
+                if self.verbose: print(f"Error merging pending orders: {pe}", file=sys.stderr)
 
             return positions
         except Exception as e:
-            if self.verbose: print(f"Error during open positions scrape: {e}")
+            if self.verbose: print(f"Error during open positions scrape: {e}", file=sys.stderr)
             return []
 
     def get_pending_orders(self):
@@ -209,7 +226,7 @@ class HTMWTrader:
                         })
             return pending
         except Exception as e:
-            if self.verbose: print(f"Error during pending orders scrape: {e}")
+            if self.verbose: print(f"Error during pending orders scrape: {e}", file=sys.stderr)
             return []
 
     def trade(self, symbol, action, quantity, order_type="Market", limit_stop_price=0, order_term='Good for Day'):
@@ -390,11 +407,11 @@ class HTMWTrader:
                     "buying_power": get_clean_value("buyingPower")
                 }
             except Exception as e:
-                if self.verbose: print(f"Dashboard summary IDs not found, trying fallback: {e}")
+                if self.verbose: print(f"Dashboard summary IDs not found, trying fallback: {e}", file=sys.stderr)
                 summary_el = self.driver.find_element(By.CLASS_NAME, "summary")
                 return {"info": summary_el.text.strip()}
         except Exception as e:
-            if self.verbose: print(f"Error in get_portfolio_summary: {e}")
+            if self.verbose: print(f"Error in get_portfolio_summary: {e}", file=sys.stderr)
             return {"error": str(e)}
 
     def get_market_movers(self):
@@ -440,7 +457,7 @@ class HTMWTrader:
             """)
             return movers or {}
         except Exception as e:
-            if self.verbose: print(f"Error in get_market_movers: {e}")
+            if self.verbose: print(f"Error in get_market_movers: {e}", file=sys.stderr)
             return {}
 
     def get_analyst_ratings(self, symbol):
@@ -538,7 +555,7 @@ class HTMWTrader:
         self.driver.quit()
 
 # MCP Server Implementation
-mcp = FastMCP("HTMW Trader", log_level="ERROR")
+mcp = FastMCP("HTMW Trader")
 
 # Global trader instance
 _trader = None
@@ -609,6 +626,53 @@ def get_price_history(symbol: str):
     """Get recent historical price data (Date, Open, High, Low, Close, Volume, etc.) for a stock."""
     return get_trader().get_price_history(symbol)
 
+@mcp.tool()
+def web_search(query: str):
+    """
+    Search the web for news, sentiment, or macro data using DuckDuckGo.
+    This is an optional research tool.
+    """
+    if not HAS_DDG:
+        return "DuckDuckGo search library is not installed. This tool is unavailable."
+    
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=8))
+            if not results:
+                return "No results found for your search."
+            
+            output = "Search Results:\n"
+            for r in results:
+                output += f"- {r['title']} ({r['href']})\n  {r['body']}\n\n"
+            return output
+    except Exception as e:
+        return f"Error performing web search: {e}"
+
+@mcp.tool()
+def scrape_url(url: str):
+    """
+    Scrape and extract clean text from a specific URL. 
+    Useful for reading news articles or financial reports.
+    This is an optional research tool.
+    """
+    if not HAS_TRAFILATURA:
+        return "Trafilatura library is not installed. This tool is unavailable."
+    
+    try:
+        downloaded = trafilatura.fetch_url(url)
+        if not downloaded:
+            return f"Failed to download content from {url}"
+            
+        result = trafilatura.extract(downloaded)
+        if not result:
+            return f"Failed to extract text from {url}"
+            
+        # Truncate to avoid context window explosion
+        return result[:8000] 
+    except Exception as e:
+        return f"Error scraping URL: {e}"
+
 
 if __name__ == "__main__":
-    mcp.run()
+    # Ensure no stdout pollution from fastmcp banner/logs
+    mcp.run(log_level="ERROR")
